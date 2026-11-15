@@ -1,0 +1,42 @@
+{
+  "training": [
+    {
+      "id": "a",
+      "score": 10,
+      "label": 0,
+      "weight": 1
+    },
+    {
+      "id": "b",
+      "score": 20,
+      "label": 1,
+      "weight": 1
+    },
+    {
+      "id": "c",
+      "score": 30,
+      "label": 0,
+      "weight": 1
+    },
+    {
+      "id": "d",
+      "score": 40,
+      "label": 1,
+      "weight": 1
+    }
+  ],
+  "evaluation": [
+    {
+      "id": "e",
+      "score": 25,
+      "label": 1,
+      "weight": 1
+    },
+    {
+      "id": "f",
+      "score": 5,
+      "label": 0,
+      "weight": 1
+    }
+  ]
+}
