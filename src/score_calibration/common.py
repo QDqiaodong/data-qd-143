@@ -18,9 +18,9 @@ def rows(value,limit=20000):
     if not isinstance(value,list) or len(value)>limit:raise ValueError('expected bounded array')
     return value
 
-def read(path):
-    with Path(path).open('rb') as stream:raw=stream.read(8_000_001)
-    if len(raw)>8_000_000:raise ValueError('JSON exceeds 8 MB')
+def read(path, byte_limit=8_000_000):
+    with Path(path).open('rb') as stream:raw=stream.read(byte_limit+1)
+    if len(raw)>byte_limit:raise ValueError(f'JSON exceeds {byte_limit} bytes')
     def unique(pairs):
         result={}
         for k,v in pairs:

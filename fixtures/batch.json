@@ -1,0 +1,44 @@
+{
+  "events": [
+    {
+      "event_id": "evt-0001",
+      "observation_id": "obs-a",
+      "entity_id": "entity-alpha",
+      "observed_at": "2026-01-05T09:00:00Z",
+      "score": 10,
+      "label": 0,
+      "weight": 1,
+      "retract": false
+    },
+    {
+      "event_id": "evt-0002",
+      "observation_id": "obs-b",
+      "entity_id": "entity-beta",
+      "observed_at": "2026-01-06T10:30:00+02:00",
+      "score": 20,
+      "label": 1,
+      "weight": 2,
+      "retract": false
+    },
+    {
+      "event_id": "evt-0003",
+      "observation_id": "obs-c",
+      "entity_id": "entity-gamma",
+      "observed_at": "2026-02-01T00:00:00Z",
+      "score": 40,
+      "label": 1,
+      "weight": 1,
+      "retract": false
+    },
+    {
+      "event_id": "evt-0004",
+      "observation_id": "obs-d",
+      "entity_id": "entity-delta",
+      "observed_at": "2026-03-10T12:00:00Z",
+      "score": 99,
+      "label": 0,
+      "weight": 1,
+      "retract": true
+    }
+  ]
+}

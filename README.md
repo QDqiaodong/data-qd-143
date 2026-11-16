@@ -27,6 +27,28 @@ python3 -m venv .venv
 src/score_calibration/model.py 为业务模型，相关算法模块独立组织；common.py 提供受限JSON及报告发布，
 cli.py 衔接数据链路。fixtures 为明确自制样例，代码与样例采用MIT许可。
 
+## 修订账本与版本化报告（v2）
+
+仅用标准库与 `sqlite3` 的仅追加修订事件账本，按 `knowledge_seq` 维护物化观察视图并产出可逐字节
+复现的版本化校准报告。数据契约见 [docs/contract.md](docs/contract.md)，隔离、读视图副本与崩溃恢复
+方案见 [docs/design-ledger.md](docs/design-ledger.md)。
+
+```sh
+# 追加一个修订批次（全新事件取得下一个 knowledge_seq；整批重放返回原接收结果且不推进序号）
+score-calibration ingest --ledger run/ledger.db --batch path/to/batch.json
+# 固定版本计算并原子发布报告；同版本同请求逐字节相同，输出冲突时保留原文件并退出 2
+score-calibration report --ledger run/ledger.db --request path/to/request.json --output run/report.json
+```
+
+- 批次为 `{"events":[...]}`，事件字段、RFC3339(UTC 规范化)、整数边界与撤回语义见契约文档；
+  批内重复、跨批 `event_id` 冲突、混合重放整批回滚；事件永不物理删除。
+- 请求固定 `observed_at_cutoff / knowledge_seq(latest 或正整数) / split_seed`；按
+  `SHA256(seed + NUL + entity_id)` 首 8 字节做实体整体 80/20 切分，训练为空是业务错误且不写输出。
+- 报告先固定版本与事件日志摘要，再把该 seq 不可变事件范围复制到经完整性校验的临时 SQLite 副本后
+  计算，并发导入不会让在途报告混入更高 seq；副本校验不过绝不登记报告。
+- 物化投影按 seq 共存，`building`/失配投影重启后由日志重建；仅评估侧更正复用训练依赖身份，
+  训练侧或成员变化才更新训练身份（曲线值允许恰好相同）。
+
 ## 当前业务与样例
 # Weighted isotonic calibration v1
 
