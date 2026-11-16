@@ -1,10 +1,13 @@
 # 数据契约
 
-本仓包含两条相互独立但共享同一套 PAVA 校准内核的链路：
+本仓包含三条相互独立但共享同一套 PAVA 校准内核的链路：
 
 1. **v1 单次 JSON 分析（保持不变）**：`score-calibration --source F --output F`。
 2. **v2 修订账本与版本化报告**：`score-calibration ingest` 与 `score-calibration report`，
    仅使用 Python 标准库与 `sqlite3`。设计与崩溃恢复说明见 [design-ledger.md](design-ledger.md)。
+3. **v3 双人盲标规划与答案回收**：`score-calibration annotation-plan` 与
+   `score-calibration annotation-resolve`，仅使用 Python 标准库；交付自校验 JSON
+   标注包，不写入修订账本。设计说明见 [design-annotation.md](design-annotation.md)。
 
 ---
 
@@ -110,3 +113,78 @@ log-loss 用自然对数，出现真实标签对应概率 0 时返回 null 并�
   只有新批次提交后才推进物化水位，半成品不会被标记完成。
 - 折叠、摘要、复制均 `fetchmany` 流式进行；内存上界随选定 seq 的有效观察量增长，不随旧修订
   事件总数增长。
+
+---
+
+## 3. v3 双人盲标规划与答案回收
+
+### 3.1 annotation-plan 输入契约
+
+`score-calibration annotation-plan --source F --output F`，输入必须且仅含字段
+`training / pool / annotators / quotas / budget`，拒绝未知字段与重复 JSON 键。
+
+- `training`：沿用 v1 的 `id/score/label/weight` 行契约（`common.ident`、score
+  0..10^6 整数、weight 1..10^6 整数、label 严格 0/1），非空；布尔不得冒充整数。
+- `pool`：1..18 行，每行严格为
+  `{id, entity_id, group, score, weight, eligible}`。
+  - `id` 为标识符且全池唯一，不得与任一 `training.id` 相交；
+  - `eligible` 为允许接单的标注员 ID 数组，非空、无重复、只引用已声明人员；
+  - 同一 `entity_id` 的所有候选必须属于同一个 `group`。
+- `annotators`：1..8 行，每行 `{id, capacity}`，`capacity` 为 0..36 整数。
+- `quotas`：非空 `group -> {min,max}` 映射，至多 4 个组，
+  `0 <= min <= max <= 18`；每个 pool 组必须恰有一条配额。
+- `budget`：0..36 整数。
+
+### 3.2 概率、价值与精确分配
+
+- 先在 `training` 上跑与 v1 完全相同的加权 PAVA，得到非递减阶梯；pool 分数按
+  “起始分数 <= score 的最后一块”取精确 `Fraction` 概率（区间左闭、两端夹取，非插值）。
+- 候选价值固定为精确有理数 `weight * (1 - |2p - 1|)`，在规划时一次性封入包内；
+  后续回收答案不会重算概率或价值，本轮排序依据不变。
+- 每个被选候选恰分配**两个不同的 eligible 标注员**；同一 entity 至多选一条；一个
+  标注员在整个包内不得处理同一 entity 的两条候选。每份任务花费 1 预算并各占两名
+  人员 1 点 capacity，组覆盖数必须落在 `[min,max]`。
+- 全局目标严格按字典序：先最大化候选价值之和，再最大化覆盖候选数，最后取排序后
+  `(id, 较小人员ID, 较大人员ID)` 元组序列字典序最小者。全程精确有理比较，不存在
+  “先按价值贪心再补配额”的捷径；高价值贪心使组下界不可达时必须让位。
+- 无可行解时包 `status` 显式为 `infeasible` 并给出各组真实缺口 `gaps`，绝不生成
+  伪成功的待办；此时仍保留可 staff 的最佳努力任务（best-effort），不伪造可行。
+
+### 3.3 annotation-resolve 答案契约
+
+`score-calibration annotation-resolve --package F --answers F --output F`，答案文件
+严格为 `{"package_sha256": "...", "answers": [...]}`：
+
+- 摘要必须与输入包自校验 SHA256 完全一致，否则整批拒绝且不触碰输出。
+- 每份答案严格为 `{id, annotator_id, label}`，`label` 为 0/1 整数（布尔拒绝）。
+- 未知任务、答卷人不在该任务分配对中、同一 `(任务, 标注员)` 重复答卷、改写包中
+  已有答案，一律整批拒绝（先全部校验再落任何变更）。
+- 允许只回收部分任务：0 份答案合法且产出逐字节等价的新包。任务状态机：
+  无答案 `open` → 一份 `pending` → 两份一致 `agreed` / 两份不同 `disputed`。
+- 仅 `agreed` 候选进入 `truth` 真值数据集，行字段为可直接喂给 v1 分析的
+  `id/score/label/weight`；`pending` 与 `disputed` 一律不混入。
+
+### 3.4 争议、补位与包不变量
+
+- 候选变为 `disputed` 时：取消其组覆盖贡献，但**保留两份已花预算与两点人员占用
+  （不退款）**，封锁该 entity，并在剩余候选上重算补位组合。
+- `pending` 与 `agreed` 的原分配全部固定，补位不得挪人或换样；新补位任务同样双人
+  且受剩余预算、剩余人员 capacity 与组上界约束，目标只在补位部分上比较。已经分配
+  过的候选不得再次入选。
+- 补位不可行时仍输出完整回收结果、真值与残余缺口并标记 `infeasible`，不得丢弃已
+  收到的答案或通过退款制造可行性；包仍可继续回收其余任务。
+
+### 3.5 包内容、自校验与发布
+
+包为确定性 JSON（键排序、无时间戳/随机字段），含：规范化源数据 `source`、训练块
+`training_blocks`、逐候选 `probability/value` 的 `candidates`、全部已分配 `tasks`
+（含状态、答卷、generation）、预算与人员 `usage`、`group_coverage`、`gaps`、
+`truth` 与自校验 `package_sha256`。
+
+- 摘要算法：去除自身 SHA 字段后，对剩余对象取排序键、紧凑、UTF-8 JSON 的 SHA256。
+- resolve 必须重算并核验摘要、源 PAVA 概率/价值、任务状态、预算/容量/覆盖/缺口/
+  真值的一致性；用户伪造的 `agreed` 状态或 `truth` 行无法通过校验。
+- 源训练、pool 或人员数组换序不影响最终包字节。
+- 允许输出路径与输入包相同：先完整读取、校验、计算，再临时文件 + 原子 `os.replace`
+  替换；输出符号链接拒绝。输入或计算错误退出 2 并保留旧输出；合法但 infeasible 退出
+  0 并显式标注状态，包可继续回收。

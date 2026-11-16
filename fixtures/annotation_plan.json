@@ -1,0 +1,25 @@
+{
+  "training": [
+    {"id": "t1", "score": 10, "label": 0, "weight": 1},
+    {"id": "t2", "score": 20, "label": 1, "weight": 1},
+    {"id": "t3", "score": 30, "label": 0, "weight": 1},
+    {"id": "t4", "score": 40, "label": 1, "weight": 1}
+  ],
+  "pool": [
+    {"id": "p1", "entity_id": "e1", "group": "g1", "score": 25, "weight": 4, "eligible": ["a1", "a2", "a3"]},
+    {"id": "p2", "entity_id": "e2", "group": "g1", "score": 40, "weight": 2, "eligible": ["a2", "a3"]},
+    {"id": "p3", "entity_id": "e3", "group": "g2", "score": 10, "weight": 3, "eligible": ["a1", "a3", "a4"]},
+    {"id": "p4", "entity_id": "e4", "group": "g2", "score": 20, "weight": 1, "eligible": ["a2", "a4"]}
+  ],
+  "annotators": [
+    {"id": "a1", "capacity": 3},
+    {"id": "a2", "capacity": 3},
+    {"id": "a3", "capacity": 3},
+    {"id": "a4", "capacity": 3}
+  ],
+  "quotas": {
+    "g1": {"min": 1, "max": 2},
+    "g2": {"min": 1, "max": 2}
+  },
+  "budget": 6
+}

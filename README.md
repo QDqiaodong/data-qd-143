@@ -49,6 +49,30 @@ score-calibration report --ledger run/ledger.db --request path/to/request.json -
 - 物化投影按 seq 共存，`building`/失配投影重启后由日志重建；仅评估侧更正复用训练依赖身份，
   训练侧或成员变化才更新训练身份（曲线值允许恰好相同）。
 
+## 双人盲标规划与答案回收（v3）
+
+仅用标准库构建可续用的自校验 JSON 标注包，为评分样本补充双人盲标人工真值；不写入修订
+账本。数据契约见 [docs/contract.md](docs/contract.md)，求解器与补位设计见
+[docs/design-annotation.md](docs/design-annotation.md)。
+
+```sh
+# 依据 training/pool/annotators/quotas/budget 生成标注包（精确 PAVA 概率与价值、双人精确分配）
+score-calibration annotation-plan --source path/to/plan.json --output run/package.json
+# 回收（可分批）答案；争议自动封锁 entity 并在剩余预算/容量内补位，重封包
+score-calibration annotation-resolve --package run/package.json \
+    --answers path/to/answers.json --output run/package.json
+```
+
+- 分配目标：先最大化候选价值 `weight*(1-|2p-1|)` 之和，再最大化覆盖数，最后取排序后
+  `(id, 较小人员, 较大人员)` 元组序列字典序最小；全程精确有理比较，无价值贪心捷径。
+- 任务状态 `open/pending/agreed/disputed`；仅 agreed 进入包内 `truth`（id/score/label/
+  weight，可直接作为 v1 分析输入）。争议保留两份已花预算与人员占用、封锁 entity 后补位；
+  pending/agreed 原分配固定不挪人。补位不可行时输出完整结果与残余缺口并标 infeasible。
+- 包含规范化源数据、训练块、逐候选概率/价值、任务状态、预算/人员用量、组覆盖、真值与
+  自校验 SHA256；resolve 重算并核验全部不变量，伪造的 agreed 状态不被采信。
+- 合法但 infeasible 退出 0 且包可继续回收；输入/计算错误退出 2 并保留旧输出；允许输出与
+  输入包同路径（先读后原子替换），符号链接拒绝，无时间戳或随机字段。
+
 ## 当前业务与样例
 # Weighted isotonic calibration v1
 
