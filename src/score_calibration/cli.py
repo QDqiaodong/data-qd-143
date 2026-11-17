@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import annotation, ledger, monitor
+from . import annotation, ledger, monitor, policy
 from .common import read, save
 from .model import analyze
 
@@ -14,11 +14,13 @@ LEDGER_JSON_LIMIT = 256 * 1024 * 1024
 ANNOTATION_JSON_LIMIT = 8 * 1024 * 1024
 # Monitor snapshots carry two arrays of at most 20000 rows each.
 MONITOR_JSON_LIMIT = 64 * 1024 * 1024
+# Policy requests are single-shot JSON like the legacy analysis.
+POLICY_JSON_LIMIT = 8 * 1024 * 1024
 
 _BUSINESS_ERRORS = (
     ValueError, TypeError, KeyError, OSError, OverflowError, RecursionError,
     ledger.LedgerError, annotation.AnnotationError,
-    monitor.MonitorError,
+    monitor.MonitorError, policy.PolicyError,
 )
 
 
@@ -142,6 +144,27 @@ def _monitor_status(args):
     return 0
 
 
+def _policy(args):
+    data, _ = read(args.source, byte_limit=POLICY_JSON_LIMIT)
+    outcome = policy.build_policy(data)
+    if outcome['status'] == 'infeasible':
+        # A legal but infeasible request is a successful run (exit 0): no
+        # policy is published and any previous output file is preserved.
+        print(json.dumps(outcome, sort_keys=True, ensure_ascii=False))
+        return 0
+    reused = policy.publish_policy(args.output, outcome)
+    print(json.dumps({
+        'status': 'feasible',
+        'source_sha256': outcome['source_sha256'],
+        'policy_sha256': outcome[policy.SHA_FIELD],
+        'cohort_count': len(outcome['cohorts']),
+        'total_positive_coverage': outcome['totals']['positive_coverage'],
+        'total_false_accepts': outcome['totals']['false_accepts'],
+        'idempotent_existing_output': reused,
+    }, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
 def _legacy(args):
     if args.source.resolve() == args.output.resolve():
         raise ValueError('input and output must differ')
@@ -211,6 +234,14 @@ def main(argv=None):
     status_parser.add_argument('--output', type=Path, required=True)
     status_parser.set_defaults(func=_monitor_status)
 
+    policy_parser = sub.add_parser(
+        'policy',
+        help='build a grouped decision policy under a shared false-positive '
+             'budget')
+    policy_parser.add_argument('--source', type=Path, required=True)
+    policy_parser.add_argument('--output', type=Path, required=True)
+    policy_parser.set_defaults(func=_policy)
+
     # Legacy single-shot JSON analysis (unchanged contract).
     parser.add_argument('--source', type=Path)
     parser.add_argument('--output', type=Path)
@@ -219,13 +250,13 @@ def main(argv=None):
     try:
         if args.command in ('ingest', 'report', 'annotation-plan',
                             'annotation-resolve', 'monitor-sync', 'monitor-claim',
-                            'monitor-ack', 'monitor-status'):
+                            'monitor-ack', 'monitor-status', 'policy'):
             return args.func(args)
         if args.source and args.output:
             return _legacy(args)
         parser.error('use ingest, report, annotation-plan, annotation-resolve, '
                      'monitor-sync, monitor-claim, monitor-ack, monitor-status, '
-                     'or --source/--output')
+                     'policy, or --source/--output')
     except _BUSINESS_ERRORS as error:
         print(str(error), file=sys.stderr)
         return 2

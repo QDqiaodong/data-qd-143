@@ -104,6 +104,29 @@ score-calibration monitor-status --db run/monitor.db --output run/monitor-status
 - 重开库不丢租约、sent 状态与 ack 回执；无网络发送、不声称网络端 exactly-once，外部按通知
   id 去重。事务外计算、提交时指纹化全部相关表后重试，竞争 ack/sync 不会漏更正或覆盖新状态。
 
+## 分组决策策略（v5）
+
+仅用标准库，由一次完整请求生成可交给下游评分服务的分组决策策略；不读写修订账本或监测
+数据库。数据契约见 [docs/contract.md](docs/contract.md)，精确性论证见
+[docs/design-policy.md](docs/design-policy.md)。
+
+```sh
+# 依据 training/evaluation/cohort_rules/false_positive_budget 生成逐组阈值策略
+score-calibration policy --source fixtures/policy.json --output run/policy.json
+```
+
+- 复用同一套 PAVA 与左闭阶梯预测（无插值/裁剪）；每组候选阈值为该组评估行预测概率的
+  每个不同精确 Fraction 值加拒绝全部哨兵（`">1"`），概率 >= 阈值左闭等值接受；每组须
+  满足 `min_positive_weight` 下限。
+- 在共享 `false_positive_budget` 下精确求解：先最大化总正例覆盖量，再最小化总误接受量，
+  最后取按 cohort 字典序排列的阈值向量字典序最小者；按组推进的精确 DP（不同预算状态
+  不合并、不做覆盖上界剪枝），不做"先局部最优再截断"。
+- 不可行分两种：组缺口（某组达不到下限）与预算缺口（最便宜合格组合仍超预算），退出 0、
+  打印缺口且不写输出；错误退出 2 并保留旧输出。
+- 成功策略含逐组精确阈值/覆盖/误接受/排序后 accepted_ids、总量、规范化输入 SHA256、
+  目标函数值与自校验 `policy_sha256`；输入数组换序不改变策略字节。输出已存在时仅逐字节
+  相同才幂等成功，否则保留旧文件报冲突；符号链接拒绝，成功原子发布。
+
 ## 当前业务与样例
 # Weighted isotonic calibration v1
 

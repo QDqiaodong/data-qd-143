@@ -1,0 +1,77 @@
+{
+  "training": [
+    {
+      "id": "t1",
+      "score": 10,
+      "label": 0,
+      "weight": 1
+    },
+    {
+      "id": "t2",
+      "score": 20,
+      "label": 1,
+      "weight": 1
+    },
+    {
+      "id": "t3",
+      "score": 30,
+      "label": 0,
+      "weight": 1
+    },
+    {
+      "id": "t4",
+      "score": 40,
+      "label": 1,
+      "weight": 1
+    }
+  ],
+  "evaluation": [
+    {
+      "id": "a1",
+      "cohort": "a",
+      "score": 25,
+      "label": 1,
+      "weight": 4
+    },
+    {
+      "id": "a2",
+      "cohort": "a",
+      "score": 25,
+      "label": 0,
+      "weight": 3
+    },
+    {
+      "id": "a3",
+      "cohort": "a",
+      "score": 45,
+      "label": 1,
+      "weight": 2
+    },
+    {
+      "id": "b1",
+      "cohort": "b",
+      "score": 25,
+      "label": 1,
+      "weight": 5
+    },
+    {
+      "id": "b2",
+      "cohort": "b",
+      "score": 25,
+      "label": 0,
+      "weight": 4
+    },
+    {
+      "id": "b3",
+      "cohort": "b",
+      "score": 45,
+      "label": 1,
+      "weight": 1
+    }
+  ],
+  "cohort_rules": {
+    "a": 2,
+    "b": 1
+  },
+  "false_positive_budget": 4
+}

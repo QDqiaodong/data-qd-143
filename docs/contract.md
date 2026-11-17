@@ -1,6 +1,6 @@
 # 数据契约
 
-本仓包含四条相互独立但共享同一套 PAVA 校准内核的链路：
+本仓包含五条相互独立但共享同一套 PAVA 校准内核的链路：
 
 1. **v1 单次 JSON 分析（保持不变）**：`score-calibration --source F --output F`。
 2. **v2 修订账本与版本化报告**：`score-calibration ingest` 与 `score-calibration report`，
@@ -11,6 +11,9 @@
 4. **v4 评分漂移监测与通知发件箱**：`score-calibration monitor-sync / monitor-claim /
    monitor-ack / monitor-status`，仅使用 Python 标准库与独立 `sqlite3` 监测库；不读写
    修订账本或盲标包。设计与并发正确性说明见 [design-monitor.md](design-monitor.md)。
+5. **v5 分组决策策略**：`score-calibration policy`，仅使用 Python 标准库；由一次完整
+   请求生成可交给下游评分服务的分组决策策略，不读写修订账本或监测数据库。设计说明
+   见 [design-policy.md](design-policy.md)。
 
 ---
 
@@ -259,3 +262,62 @@ PAVA 与左闭阶梯预测复用现有内核，无插值、无概率裁剪。每
 `monitor-status --db DB --output FILE` 在单一致读快照内输出 revision、当前每窗精确
 Fraction 指标、各组 episode、全部通知/租约/sent 记录与成功回执；排序键 JSON、无运行时
 时间戳。符号链接拒绝；输出已存在且内容不同保留旧文件并退出 2；合法空队列退出 0。
+
+---
+
+## 5. v5 分组决策策略
+
+`score-calibration policy --source F --output F` 由一次完整请求生成可交给下游评分
+服务的分组决策策略。仅使用 Python 标准库；不读写修订账本或监测数据库。精确性论证
+见 [design-policy.md](design-policy.md)。
+
+### 5.1 请求契约
+
+输入必须且仅含字段 `training / evaluation / cohort_rules / false_positive_budget`，
+拒绝未知字段与重复 JSON 键；布尔不得冒充整数。
+
+- `training`：沿用 v1 的 `id/score/label/weight` 行契约（`common.ident`、score
+  0..10^6 整数、weight 1..10^6 整数、label 严格 0/1），非空，id 唯一。
+- `evaluation`：至多 20000 行，每行严格 `id/cohort/score/label/weight`；id 唯一
+  且不与 training 相交；cohort 为 `common.ident`；可空。
+- `cohort_rules`：`cohort -> min_positive_weight` 映射；`min_positive_weight` 为
+  1..10^9 整数。每个评估行的 cohort 必须恰有一条规则；规则可以覆盖没有评估行的
+  cohort（该组只有拒绝全部哨兵候选，正整数下限必然不可达，按组缺口处理）。
+- `false_positive_budget`：0..10^9 整数。
+
+### 5.2 候选与组合
+
+- 复用 v1 同一套加权 PAVA 与左闭阶梯预测（无插值、无概率裁剪），概率为精确
+  `Fraction`；阈值与全部比较不经过浮点舍入。
+- 每组候选阈值 = 该组评估行实际预测概率的每个不同精确值 + 一个严格大于 1 的
+  拒绝全部哨兵（序列化为 `">1"`）。概率 `>=` 阈值即接受（左闭等值接受）。
+- 候选的正例覆盖量 = 接受行中 label=1 的 weight 之和；误接受量 = 接受行中
+  label=0 的 weight 之和。局部合格：覆盖量 `>=` 该组 `min_positive_weight`。
+- 组合选择：每组恰选一个局部合格候选，且总误接受量 `<= false_positive_budget`。
+  目标严格按字典序：先最大化总正例覆盖量，再最小化总误接受量，最后取按 cohort
+  字典序排列的阈值向量（阈值按精确值升序、哨兵视为最大）字典序最小者。不得先取
+  各组独立最优再截断或拒绝。
+
+### 5.3 不可行
+
+- 某组所有候选都达不到下限 → `status=infeasible`、`kind=cohort_gap`，给出该组
+  真实缺口（`min_positive_weight` − 该组最大可达覆盖量）。
+- 各组均有合格候选但没有任何组合满足预算 → `kind=budget_gap`，预算缺口 =
+  各组合格候选的最小误接受量之和 − budget。
+- 不可行时不发布策略、不写输出文件、不输出部分策略；退出 0（合法请求的确定性
+  否定结果），既有输出文件保留。
+
+### 5.4 策略内容与发布
+
+成功策略为确定性 JSON（键排序、无时间戳/随机字段），含：`schema_version=5`、
+`status=feasible`、`source_sha256`（规范化请求的排序键紧凑 UTF-8 JSON 的 SHA256；
+training/evaluation 数组换序不改变策略字节）、`false_positive_budget`、逐组
+`cohort/min_positive_weight/threshold/positive_coverage/false_accepts/accepted_ids`
+（按 cohort 字典序，accepted_ids 排序）、`totals`（总覆盖量与总误接受量）、
+`objective`（总覆盖量、总误接受量与阈值向量，即目标函数值）与自校验
+`policy_sha256`（去除自身字段后对正文取排序键紧凑 UTF-8 JSON 的 SHA256，可外部
+复算）。
+
+发布：输出已存在且逐字节相同 → 幂等成功；不同 → 保留旧文件报冲突并退出 2；
+符号链接拒绝；临时文件 + 原子 `os.replace` 落盘。输入或计算错误退出 2 并保留旧
+输出。
