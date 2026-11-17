@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import annotation, ledger
+from . import annotation, ledger, monitor
 from .common import read, save
 from .model import analyze
 
@@ -12,10 +12,13 @@ from .model import analyze
 LEDGER_JSON_LIMIT = 256 * 1024 * 1024
 # Annotation packages/answers are small bounded contracts.
 ANNOTATION_JSON_LIMIT = 8 * 1024 * 1024
+# Monitor snapshots carry two arrays of at most 20000 rows each.
+MONITOR_JSON_LIMIT = 64 * 1024 * 1024
 
 _BUSINESS_ERRORS = (
     ValueError, TypeError, KeyError, OSError, OverflowError, RecursionError,
     ledger.LedgerError, annotation.AnnotationError,
+    monitor.MonitorError,
 )
 
 
@@ -92,6 +95,53 @@ def _annotation_resolve(args):
     return 0
 
 
+def _monitor_sync(args):
+    data, _ = read(args.snapshot, byte_limit=MONITOR_JSON_LIMIT)
+    conn = monitor.connect(args.db)
+    try:
+        receipt = monitor.sync(conn, data)
+    finally:
+        conn.close()
+    print(json.dumps(receipt, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
+def _monitor_claim(args):
+    conn = monitor.connect(args.db)
+    try:
+        result = monitor.claim(conn, args.worker, args.now, args.lease_seconds)
+    finally:
+        conn.close()
+    # An empty valid queue exits 0 and prints JSON null.
+    print(json.dumps(result, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
+def _monitor_ack(args):
+    conn = monitor.connect(args.db)
+    try:
+        receipt = monitor.ack(conn, args.notice, args.token, args.now)
+    finally:
+        conn.close()
+    print(json.dumps(receipt, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
+def _monitor_status(args):
+    conn = monitor.connect(args.db)
+    try:
+        report = monitor.status_report(conn, args.output)
+    finally:
+        conn.close()
+    print(json.dumps({
+        'revision': report['revision'],
+        'output': str(args.output),
+        'notice_count': len(report['notices']),
+        'episode_count': len(report['episodes']),
+    }, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
 def _legacy(args):
     if args.source.resolve() == args.output.resolve():
         raise ValueError('input and output must differ')
@@ -133,6 +183,34 @@ def main(argv=None):
     resolve_parser.add_argument('--output', type=Path, required=True)
     resolve_parser.set_defaults(func=_annotation_resolve)
 
+    sync_parser = sub.add_parser(
+        'monitor-sync', help='atomically publish a drift snapshot revision')
+    sync_parser.add_argument('--db', type=Path, required=True)
+    sync_parser.add_argument('--snapshot', type=Path, required=True)
+    sync_parser.set_defaults(func=_monitor_sync)
+
+    claim_parser = sub.add_parser(
+        'monitor-claim', help='lease the first available current notification')
+    claim_parser.add_argument('--db', type=Path, required=True)
+    claim_parser.add_argument('--worker', required=True)
+    claim_parser.add_argument('--now', type=int, required=True)
+    claim_parser.add_argument('--lease-seconds', type=int, required=True)
+    claim_parser.set_defaults(func=_monitor_claim)
+
+    ack_parser = sub.add_parser(
+        'monitor-ack', help='confirm delivery of a leased notification')
+    ack_parser.add_argument('--db', type=Path, required=True)
+    ack_parser.add_argument('--notice', type=int, required=True)
+    ack_parser.add_argument('--token', required=True)
+    ack_parser.add_argument('--now', type=int, required=True)
+    ack_parser.set_defaults(func=_monitor_ack)
+
+    status_parser = sub.add_parser(
+        'monitor-status', help='publish a consistent status JSON report')
+    status_parser.add_argument('--db', type=Path, required=True)
+    status_parser.add_argument('--output', type=Path, required=True)
+    status_parser.set_defaults(func=_monitor_status)
+
     # Legacy single-shot JSON analysis (unchanged contract).
     parser.add_argument('--source', type=Path)
     parser.add_argument('--output', type=Path)
@@ -140,11 +218,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command in ('ingest', 'report', 'annotation-plan',
-                            'annotation-resolve'):
+                            'annotation-resolve', 'monitor-sync', 'monitor-claim',
+                            'monitor-ack', 'monitor-status'):
             return args.func(args)
         if args.source and args.output:
             return _legacy(args)
         parser.error('use ingest, report, annotation-plan, annotation-resolve, '
+                     'monitor-sync, monitor-claim, monitor-ack, monitor-status, '
                      'or --source/--output')
     except _BUSINESS_ERRORS as error:
         print(str(error), file=sys.stderr)

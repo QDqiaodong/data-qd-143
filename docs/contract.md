@@ -1,6 +1,6 @@
 # 数据契约
 
-本仓包含三条相互独立但共享同一套 PAVA 校准内核的链路：
+本仓包含四条相互独立但共享同一套 PAVA 校准内核的链路：
 
 1. **v1 单次 JSON 分析（保持不变）**：`score-calibration --source F --output F`。
 2. **v2 修订账本与版本化报告**：`score-calibration ingest` 与 `score-calibration report`，
@@ -8,6 +8,9 @@
 3. **v3 双人盲标规划与答案回收**：`score-calibration annotation-plan` 与
    `score-calibration annotation-resolve`，仅使用 Python 标准库；交付自校验 JSON
    标注包，不写入修订账本。设计说明见 [design-annotation.md](design-annotation.md)。
+4. **v4 评分漂移监测与通知发件箱**：`score-calibration monitor-sync / monitor-claim /
+   monitor-ack / monitor-status`，仅使用 Python 标准库与独立 `sqlite3` 监测库；不读写
+   修订账本或盲标包。设计与并发正确性说明见 [design-monitor.md](design-monitor.md)。
 
 ---
 
@@ -188,3 +191,71 @@ log-loss 用自然对数，出现真实标签对应概率 0 时返回 null 并�
 - 允许输出路径与输入包相同：先完整读取、校验、计算，再临时文件 + 原子 `os.replace`
   替换；输出符号链接拒绝。输入或计算错误退出 2 并保留旧输出；合法但 infeasible 退出
   0 并显式标注状态，包可继续回收。
+
+---
+
+## 4. v4 评分漂移监测与通知发件箱
+
+监测库是独立 SQLite 文件，仅由本链路读写，不触碰账本/盲标表。业务产物是可纠正的分组
+漂移 episode 与可恢复投递的通知，不是版本化校准报告。设计与并发论证见
+[design-monitor.md](design-monitor.md)。
+
+### 4.1 monitor-sync 快照契约
+
+`score-calibration monitor-sync --db DB --snapshot FILE`，快照严格且仅含：
+`snapshot_id, reference, observations, start_date, period_days, period_count,
+min_weight, trigger_delta, clear_delta, trigger_periods, clear_periods`。拒绝未知字段、
+重复 JSON 键；两个数组各 <=20000 行。
+
+- `reference` 沿用训练 `id/score/label/weight` 契约（`common.ident`、score 0..10^6、
+  weight 1..10^6、label 严格 0/1，布尔不算整数），非空。
+- `observations` 每行严格为 `id/cohort/date/score/label/weight`：id 唯一，cohort 与
+  snapshot_id 沿用 `common.ident`，date 为合法 `YYYY-MM-DD`，其余沿用现有整数界限；
+  两集合 id 不相交。
+- 日期必须落入从 `start_date` 起连续、左闭右开的日历窗口。
+  `period_days 1..31`、`period_count 1..366`、`min_weight 1..10^9` 整数；
+  `trigger_periods/clear_periods 1..period_count`。
+- `trigger_delta/clear_delta` 为 `[0,1]` 内有限十进制字符串（拒绝指数/分数/NaN），
+  且 `clear_delta < trigger_delta`。
+- 首次成功 sync 后除 `snapshot_id/reference/observations` 外的配置固定；后续快照是
+  **完整替换**（可纠正过去样本、删除整组），不是增量追加；空 observations 合法。
+- 同 `snapshot_id` 同规范内容重放返回原回执，不推进 revision、不复活通知；同 id 不同
+  内容整次拒绝。新 id 即使内容相同也推进 revision。首个合法 sync 取得 revision=1。
+
+### 4.2 度量与 episode
+
+PAVA 与左闭阶梯预测复用现有内核，无插值、无概率裁剪。每 cohort 每窗（空窗也输出）计算
+精确加权残差 `|Σ weight*(label-p) / Σ weight|`（Fraction）；总 weight 低于 min_weight
+（含空窗）标 `insufficient`，残差 null，且不能跳过空窗拼接 streak。
+
+- 连续 `trigger_periods` 个 eligible 且残差 `>= trigger_delta` 才开窗，`start` 回溯到
+  首个越阈值窗口；开窗后连续 `clear_periods` 个 eligible 且残差 `<= clear_delta` 才关窗，
+  `end` 为完成清除窗口。中间区间重置待定计数；insufficient 重置计数但不关已开 episode。
+- 触发 streak 起点至关窗窗口的全部 eligible 窗口参与 peak，平局选最早窗口。规范 payload
+  为 `start/end/peak_value/peak_window/open`；episode 身份是 `(cohort,start窗口)`；关闭
+  后下一窗才可开新 episode。
+
+### 4.3 通知、租约与确认
+
+- 首次出现 episode 产生 upsert；同身份 payload 变化产生新 upsert；消失按投递历史决定
+  retract。未发送的旧同身份通知被取代时 cancelled 且租约立即失效；已 sent 的变化发
+  upsert、消失发 retract，历史通知永不物理删除。同身份只有最新所需通知可 pending/leased。
+- 从未 sent 即消失只静默取消，不发 retract。已 sent 后消失、retract 未发送又出现：取消
+  retract 并按最后实际投递 payload 判定，相同则不再发。A 已 sent、B 待发又回到 A 时
+  取消 B 且不另发。判定依据是实际最后投递状态而非最近计算状态。
+- `monitor-claim` 按通知 id 取第一个 pending 或租约已过期（`now >= lease_until`）的当前
+  有效通知，返回不可复用 token、`lease_until=now+lease_seconds` 与 payload，无通知返回
+  null（退出 0）。`now` 非负整数，`lease_seconds 1..86400`，worker 用 `common.ident`，
+  每次 token 不同。已 sent 不再被 claim。
+- `monitor-ack` 仅在 token 为当前有效租约、未过期且通知仍有效时置 sent 并更新该 episode
+  最后实际投递；同 token 重复成功 ack 幂等返回原回执（不受当前 now/租约过期影响），失效
+  token 一律拒绝。重开库不丢租约、sent 状态与 ack 回执。无网络发送，外部按通知 id 去重。
+- 并发：ack 先提交则删除 episode 的 sync 必须留 retract；sync 先提交并取消租约则旧 ack
+  必须拒绝。sync 提交指纹化全部相关表（ack 不改 revision 也可能改所需通知，只核 revision
+  不足），事务外旧计算遇到竞争 sync 不得覆盖新状态。
+
+### 4.4 状态发布
+
+`monitor-status --db DB --output FILE` 在单一致读快照内输出 revision、当前每窗精确
+Fraction 指标、各组 episode、全部通知/租约/sent 记录与成功回执；排序键 JSON、无运行时
+时间戳。符号链接拒绝；输出已存在且内容不同保留旧文件并退出 2；合法空队列退出 0。

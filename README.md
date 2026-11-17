@@ -73,6 +73,37 @@ score-calibration annotation-resolve --package run/package.json \
 - 合法但 infeasible 退出 0 且包可继续回收；输入/计算错误退出 2 并保留旧输出；允许输出与
   输入包同路径（先读后原子替换），符号链接拒绝，无时间戳或随机字段。
 
+## 评分漂移监测与通知发件箱（v4）
+
+独立 SQLite 监测库（`--db`），仅用标准库与 `sqlite3`，不读写修订账本或盲标包；产物是可
+纠正的分组漂移 episode 与可恢复投递的通知。数据契约见 [docs/contract.md](docs/contract.md)，
+并发正确性（ack/sync 两种提交次序、为何只核 revision 不足）见
+[docs/design-monitor.md](docs/design-monitor.md)。
+
+```sh
+# 原子发布快照修订：完整替换 reference/observations，重算 episode 并对账通知
+score-calibration monitor-sync --db run/monitor.db --snapshot path/to/snapshot.json
+# 领取第一个 pending 或租约已过期的当前有效通知（空队列输出 null，退出 0）
+score-calibration monitor-claim --db run/monitor.db --worker w1 --now 1000 --lease-seconds 300
+# 凭有效租约确认投递；同 token 重复确认幂等返回原回执
+score-calibration monitor-ack --db run/monitor.db --notice 1 --token TOKEN --now 1001
+# 单一致读快照发布排序键 JSON 状态（无时间戳，符号链接拒绝，失败保留旧文件）
+score-calibration monitor-status --db run/monitor.db --output run/monitor-status.json
+```
+
+- 快照严格 11 个字段；reference 沿用训练行契约且非空，observations 每行
+  id/cohort/date/score/label/weight，两集合 id 不相交；日期落入从 start_date 起连续左闭
+  右开窗口；delta 为 `[0,1]` 有限十进制字符串且 `clear_delta<trigger_delta`；拒绝未知字段、
+  重复键与超 20000 行输入。首次 sync 后窗口/阈值配置固定，后续为整表替换而非增量追加。
+- 复用现有 PAVA 与左闭阶梯预测（无插值/裁剪），每窗精确 Fraction 残差；空窗也输出并重置
+  streak、不拼接；触发 streak 回溯到首个越阈值窗口，insufficient 不关已开 episode，peak
+  平局取最早窗口，episode 身份为 `(cohort,start窗口)`。
+- 通知只增不物理删除：upsert/retract/cancel 由实际最后投递状态（`delivery`，仅成功 ack
+  写入）驱动；未发送即消失静默取消不发 retract；A→B→A 中间态未发送则取消 B 且不另发；
+  通知 id 单调整数、取消 id 不复用，同身份只有最新所需通知可 pending/leased。
+- 重开库不丢租约、sent 状态与 ack 回执；无网络发送、不声称网络端 exactly-once，外部按通知
+  id 去重。事务外计算、提交时指纹化全部相关表后重试，竞争 ack/sync 不会漏更正或覆盖新状态。
+
 ## 当前业务与样例
 # Weighted isotonic calibration v1
 
